@@ -99,7 +99,22 @@ For detailed Kubernetes deployment instructions, including scaling and monitorin
 
 ## Documentation
 
-- **Architecture Report**: For a detailed explanation of the system architecture, technical decisions, and key learnings, see [architecture-report.md](architecture-report.md).
-
 - **Kubernetes Guide**: For Kubernetes-specific deployment and operations, see [k8s/README.md](k8s/README.md).
+
+## Architecture Report
+
+### Problem Statement
+This project implements a scalable, fault-tolerant message processing pipeline using microservices and Redis to demonstrate cloud-native patterns for reliable asynchronous communication in distributed systems.
+
+### Implementation Highlights
+- **Redis Lists** for work-queue semantics (RPUSH/BLPOP) ensuring each message is processed exactly once
+- **Idempotent Counters** using HSETNX to prevent duplicate counting during scaling/restarts
+- **Kubernetes Resources**: Namespace, ConfigMap, PVC, Deployments with resource limits, HPA on serviceB
+- **Health Probes**: Liveness and readiness checks ensuring service availability
+
+### Key Learnings
+1. **Pub/Sub vs. Queue Patterns**: Initial pub/sub implementation caused message duplication; switching to Redis Lists provided reliable work-queue semantics
+2. **Idempotent Processing**: Using HSETNX ensures accurate counters even with retries or duplicates
+3. **Kubernetes Scaling**: Proper queue semantics allow safe scaling without message duplication
+4. **Observability**: Redis counters and structured logging provide visibility into the asynchronous system
 
