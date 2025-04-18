@@ -1,4 +1,4 @@
-# Microservices Demo for Artis Energy Internship Interview by Krishiv Seth
+# Microservices Demo by Krishiv Seth
 
 This project demonstrates a production-like environment built with Docker Compose and Python microservices. It showcases container orchestration, inter-service communication via middleware, structured logging, error handling, and testing.
 
