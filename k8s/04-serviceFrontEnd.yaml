@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: servicefrontend
+  namespace: hsrn-vip
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: servicefrontend
+  template:
+    metadata:
+      labels:
+        app: servicefrontend
+    spec:
+      containers:
+      - name: servicefrontend
+        image: servicefrontend:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 5000
+        env:
+        - name: REDIS_HOST
+          value: redis
+        - name: REDIS_PORT
+          value: "6379"
+        resources:
+          limits:
+            cpu: "0.3"
+            memory: "256Mi"
+          requests:
+            cpu: "0.1"
+            memory: "128Mi"
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 5000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 5000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        volumeMounts:
+        - name: logs-volume
+          mountPath: /app/logs
+      volumes:
+      - name: logs-volume
+        persistentVolumeClaim:
+          claimName: logs-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: servicefrontend
+  namespace: hsrn-vip
+spec:
+  selector:
+    app: servicefrontend
+  ports:
+  - port: 5000
+    targetPort: 5000
+  type: ClusterIP 
