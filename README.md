@@ -1,120 +1,123 @@
-# Microservices Demo by Krishiv Seth
+# Microservices Pipeline Demo
 
-This project demonstrates a production-like environment built with Docker Compose and Python microservices. It showcases container orchestration, inter-service communication via middleware, structured logging, error handling, and testing.
+**A four-service message pipeline on Redis work queues, runnable with Docker Compose or Kubernetes.**
 
-## Overview
+A Flask front end accepts a message over HTTP and pushes it onto a Redis list. Three Python workers pull it through in sequence, each one appending its name, and the last worker calls back to the front end and bumps success or failure counters in Redis. A test script sends a batch and prints the tally.
 
-The following are the environment's components:
+## What it does
 
-- **serviceFrontEnd**:  
-  A Flask application that exposes a `/process` endpoint. It appends `_serviceFrontEnd` to an incoming message and forwards it to Service A.
+- **HTTP in, queue out.** `POST /process` on the front end assigns a UUID, appends `_serviceFrontEnd` to the message, and pushes it onto `queue:serviceA`. It returns the id right away and does not wait for the pipeline.
+- **Work queues, not pub/sub.** Every worker blocks on `BLPOP` against its own Redis list and `RPUSH`es to the next. A message is handed to exactly one consumer, so replicas can be added without duplicate processing.
+- **A simulated failure step.** serviceB flips a coin. Half of messages get `_serviceB_SUCCESS`, the other half get `_FAILED`. Both continue to serviceComplete.
+- **Idempotent counters.** serviceComplete uses `HSETNX` on a per-message `counted` flag before incrementing `success_count` or `failed_count`, so a redelivered message is only counted once.
+- **Completion callback.** serviceComplete posts the final message to `POST /complete` on the front end, which records the terminal state.
+- **Per-message state in Redis.** Each service writes its progress to a `message:<id>` hash, so you can inspect where any message got to.
+- **Structured logs.** Every service logs one JSON line per event to stdout and to a local `.log` file.
+- **Kubernetes manifests.** Namespace, Redis with a ConfigMap, a logs PVC, one Deployment per service with resource limits and probes, an HPA on serviceB, and an nginx Ingress.
 
-- **serviceA**:  
-  A Python microservice that listens for messages, appends `_serviceA` to the message, and forwards it to Service B.
+## How it works
 
-- **serviceB**:  
-  A Python microservice that randomly decides whether to:
-  - Append `_serviceB_SUCCESS` to the message and forward it to Service Complete, or
-  - Append `_FAILED` to the message and forward it to Service Complete.
+```mermaid
+flowchart LR
+    T["test_script.py"]
+    FE["serviceFrontEnd<br/>Flask :5000"]
+    A["serviceA"]
+    B["serviceB<br/>random pass/fail"]
+    C["serviceComplete"]
+    R[("Redis<br/>counters + message state")]
 
-- **serviceComplete**:  
-  A Python microservice that logs the final message and sends a callback to the `/complete` endpoint of servicefrontend. It also updates counters in Redis for successful and failed messages.
+    T -- "POST /process" --> FE
+    FE -- "RPUSH queue:serviceA" --> A
+    A -- "RPUSH queue:serviceB" --> B
+    B -- "RPUSH queue:serviceComplete" --> C
+    C -- "POST /complete" --> FE
+    C -- "INCR success_count / failed_count" --> R
+    T -- "read counters" --> R
+```
 
-- **Redis Middleware**:  
-  Redis is used to decouple the microservices and facilitate asynchronous communication using Lists (RPUSH/BLPOP) to implement a reliable work queue pattern.
+A message that starts as `TestMessage` ends as `TestMessage_serviceFrontEnd_serviceA_serviceB_SUCCESS` or `TestMessage_serviceFrontEnd_serviceA_FAILED`.
 
-## Project Structure
-   Each service has its own directory containing a Dockerfile and its corresponding Python code.
+## Quick start
 
-   ```
-   ├── docker-compose.yml
-   ├── README.md
-   ├── test_script.py
-   ├── serviceFrontEnd
-   │   ├── Dockerfile
-   │   └── app.py
-   ├── serviceA
-   │   ├── Dockerfile
-   │   └── service_a.py
-   ├── serviceB
-   │   ├── Dockerfile
-   │   └── service_b.py
-   └── serviceComplete
-       ├── Dockerfile
-       └── service_complete.py
-   ```
+You need Docker with Compose. Python 3.11 with `requests` and `redis` is needed for the test script.
 
-## Local Setup (Docker Compose)
+**1. Start the stack**
 
-### Prerequisites
+```bash
+docker compose up --build -d
+docker compose ps
+```
 
-- **Docker & Docker Compose**:  
-  - **macOS & Windows**: Install [Docker Desktop](https://www.docker.com/products/docker-desktop) and ensure it's running.
-  - **Linux**: Install Docker and Docker Compose using your package manager or by following the [official installation guides](https://docs.docker.com/engine/install/).
+Redis is published on `localhost:6379` and the front end on `localhost:5001`.
 
-- **Python 3.11** (for test script):  
-  - Install Python 3.11 and create a virtual environment:
-    ```bash
-    python3.11 -m venv venv
-    source venv/bin/activate  # On Windows: venv\Scripts\activate
-    pip install flask redis requests
-    ```
+**2. Send a message by hand**
 
-### Building and Running Containers
+```bash
+curl -X POST http://localhost:5001/process \
+  -H 'Content-Type: application/json' \
+  -d '{"message": "hello"}'
+```
 
-1. **Build and start containers** in detached mode:
-   ```bash
-   docker compose up --build -d
-   ```
+**3. Run the test script**
 
-2. **Verify the containers are running**:
-   ```bash
-   docker compose ps
-   ```
+```bash
+python3.11 -m venv venv && source venv/bin/activate
+pip install requests redis
+python3.11 test_script.py
+```
 
-3. **Run the test script**:
-   ```bash
-   python3.11 test_script.py
-   ```
+It sends two single messages, then a batch of 100, waits ten seconds, and prints total, successful, failed, and stuck counts read from Redis. Counters persist for the life of the Redis container, so totals accumulate across runs.
 
-   Expected output will show:
-   - Messages being processed
-   - Final statistics of total, successful, and failed messages
+**4. Watch the logs**
 
-## Kubernetes Deployment
+```bash
+docker compose logs -f servicea serviceb servicecomplete
+```
 
-This project can also be deployed to Kubernetes for a production-like environment:
+### Kubernetes
 
-1. **Deploy to Kubernetes**:
-   ```bash
-   ./deploy-to-k8s.sh
-   ```
+`deploy-to-k8s.sh` builds the four images, rebuilds them inside Minikube's Docker daemon if `minikube` is on the path, applies the manifests in order, and waits for every Deployment in the `hsrn-vip` namespace.
 
-2. **Test the Kubernetes deployment**:
-   ```bash
-   ./k8s-test-script.py --host=<service-host> --port=<service-port>
-   ```
+```bash
+./deploy-to-k8s.sh
+```
 
-For detailed Kubernetes deployment instructions, including scaling and monitoring, see the [Kubernetes README](k8s/README.md).
+Then test through port-forwards, which works on any cluster:
 
-## Documentation
+```bash
+kubectl -n hsrn-vip port-forward svc/redis 6379:6379 &
+kubectl -n hsrn-vip port-forward svc/servicefrontend 8080:5000 &
+./k8s-test-script.py --host=localhost --port=8080 --redis-host=localhost --redis-port=6379
+```
 
-- **Kubernetes Guide**: For Kubernetes-specific deployment and operations, see [k8s/README.md](k8s/README.md).
+`k8s-test-script.py` takes `--host`, `--port`, `--redis-host`, `--redis-port`, and `--batch-size`. Minikube, LoadBalancer, scaling, and cleanup commands are in [k8s/README.md](k8s/README.md).
 
-## Architecture Report
+## Configuration
 
-### Problem Statement
-This project implements a scalable, fault-tolerant message processing pipeline using microservices and Redis to demonstrate cloud-native patterns for reliable asynchronous communication in distributed systems.
+There are no environment variables. Redis is reached at `redis:6379` and the callback goes to `serviceFrontEnd:5000`, both hardcoded in the services. The Kubernetes manifests set `REDIS_HOST` and `REDIS_PORT` on each pod, but the code does not read them; it works because the Redis Service is also named `redis`.
 
-### Implementation Highlights
-- **Redis Lists** for work-queue semantics (RPUSH/BLPOP) ensuring each message is processed exactly once
-- **Idempotent Counters** using HSETNX to prevent duplicate counting during scaling/restarts
-- **Kubernetes Resources**: Namespace, ConfigMap, PVC, Deployments with resource limits, HPA on serviceB
-- **Health Probes**: Liveness and readiness checks ensuring service availability
+## Project layout
 
-### Key Learnings
-1. **Pub/Sub vs. Queue Patterns**: Initial pub/sub implementation caused message duplication; switching to Redis Lists provided reliable work-queue semantics
-2. **Idempotent Processing**: Using HSETNX ensures accurate counters even with retries or duplicates
-3. **Kubernetes Scaling**: Proper queue semantics allow safe scaling without message duplication
-4. **Observability**: Redis counters and structured logging provide visibility into the asynchronous system
+```
+├── docker-compose.yml       Redis plus the four services; front end on host port 5001
+├── deploy-to-k8s.sh         Build images and apply k8s/ in order
+├── test_script.py           Compose test: sends messages, prints Redis counters
+├── k8s-test-script.py       Same test with host and port flags for a cluster
+├── serviceFrontEnd/         Flask app: POST /process and POST /complete
+├── serviceA/                Worker: appends _serviceA
+├── serviceB/                Worker: appends _serviceB_SUCCESS or _FAILED at random
+├── serviceComplete/         Worker: counts the result and calls back to the front end
+└── k8s/                     Namespace, Redis ConfigMap, logs PVC, Deployments, HPA, Ingress
+```
 
+Each service directory holds one Python file and a Dockerfile based on `python:3.11-slim` that installs its dependencies with `pip` directly. There are no requirements files.
+
+## Limitations
+
+- The pipeline has no retries or dead-letter queue. If a worker crashes after `BLPOP` and before `RPUSH`, that message is lost and shows up as "stuck" in the test output.
+- The front end has no `GET /` route, but the Kubernetes liveness and readiness probes for `servicefrontend` request `/`. Expect those probes to fail unless you change the path or add the route.
+- The worker liveness probes use `exec` with shell pipes (`ps aux | grep ...`), which `exec` does not interpret. They will not behave as written.
+- Services log to files next to their code, not to `/app/logs`, so the logs PVC mounted in Kubernetes stays empty.
+- Redis runs with no persistence. Counters and message state disappear when the container or pod restarts.
+- serviceB's success rate is a fixed 50/50 and is not configurable.
+- `get-pip.py` in the repo root is a stray bootstrap file and is not used by anything.
